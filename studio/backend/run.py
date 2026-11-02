@@ -1552,6 +1552,14 @@ def _graceful_shutdown(server = None):
         logger.warning("Error shutting down the NPU runtime: %s", e)
 
     try:
+        from core.inference.strata_backend import peek_strata_backend
+        _strata = peek_strata_backend()
+        if _strata is not None:
+            _strata.shutdown()
+    except Exception as e:
+        logger.warning("Error shutting down the Strata server: %s", e)
+
+    try:
         from cloudflare_tunnel import close_studio_tunnel_lifecycle
         close_studio_tunnel_lifecycle()
     except Exception as e:
