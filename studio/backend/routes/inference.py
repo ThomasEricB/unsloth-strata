@@ -10358,7 +10358,8 @@ async def _reject_unservable_model(
         _strata = peek_strata_backend()
         _strata_error = _strata.status().get("error") if _strata is not None else None
         message = (
-            f"The Strata model '{requested_model}' is not loaded. Load it in Unsloth Studio first."
+            f"The Strata model '{requested_model}' is not loaded. Load it in Unsloth Studio, or turn "
+            "on 'Switch model by request' under Settings > API to load it from a request."
             + (f" {_strata_error}" if _strata_error else "")
         )
         path = getattr(getattr(fastapi_request, "url", None), "path", None)
@@ -11018,6 +11019,30 @@ async def _maybe_auto_switch_model(
     from core.inference.strata_backend import is_strata_model_path
 
     if named_model and is_strata_model_path(named_model):
+        if auto_switch_on:
+            # Strata serves /v1/chat/completions only: the one route that passes serves_npu.
+            if gguf_only or not serves_npu:
+                _refuse_non_gguf_endpoint()
+            from core.inference.strata_backend import (
+                StrataError,
+                get_strata_backend,
+                model_id_from_path as strata_model_id,
+            )
+
+            # Checked before the switch, so a request for a model Strata lacks evicts nothing.
+            try:
+                await asyncio.to_thread(
+                    get_strata_backend().loadable_model, strata_model_id(named_model)
+                )
+            except StrataError as exc:
+                raise HTTPException(status_code = 404, detail = str(exc)) from None
+            # The NPU switch is generic past its checks: _load_model_impl routes strata: paths.
+            await _auto_switch_npu_model(
+                named_model, fastapi_request, current_subject, claim_resident = claim_resident
+            )
+            if claim_resident:
+                _claim_slot_for_non_preview(fastapi_request)
+            return
         await _reject_unservable_model(named_model, fastapi_request)
         await _refuse_foreign_resident()
         if claim_resident:
