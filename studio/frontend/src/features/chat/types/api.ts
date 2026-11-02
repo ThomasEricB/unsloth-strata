@@ -217,6 +217,7 @@ export interface LoadModelResponse {
   is_mlx?: boolean;
   evicted?: string[];
   is_npu?: boolean;
+  is_strata?: boolean;
   status: string;
   model: string;
   display_name: string;
@@ -337,6 +338,7 @@ export interface InferenceStatusResponse {
   engine?: "auto" | "vllm" | "sglang";
   is_mlx?: boolean;
   is_npu?: boolean;
+  is_strata?: boolean;
   active_model: string | null;
   model_identifier?: string | null;
   is_vision: boolean;

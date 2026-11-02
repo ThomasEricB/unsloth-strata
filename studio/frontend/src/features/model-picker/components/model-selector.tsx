@@ -16,6 +16,7 @@ import type { HfTaskFilter } from "@/features/hub/hooks/use-hub-model-search";
 // eslint-disable-next-line no-restricted-imports -- The settings barrel imports this feature back.
 import { useSettingsDialogStore } from "@/features/settings/stores/settings-dialog-store";
 import { isNpuModelId, NPU_MODEL_PREFIX, useNpuStatus } from "@/features/npu";
+import { useStrataModels } from "@/features/strata";
 import { useT } from "@/i18n";
 import { ChevronDownStandardIcon } from "@/lib/chevron-icons";
 import { cn } from "@/lib/utils";
@@ -444,6 +445,8 @@ function ModelSelectorContent({
     !task && npuStatus?.supported === true
       ? { status: npuStatus, onStatusChange: setNpuStatus }
       : undefined;
+  // Chat only: Strata serves text and vision chat models.
+  const strataModels = useStrataModels(open && !task);
   const hubSectionTabs = useMemo(
     () =>
       hasExternal
@@ -738,6 +741,7 @@ function ModelSelectorContent({
               cpuLoad={cpuLoad}
               moreModels={moreModels}
               npu={npu}
+              strataModels={task ? null : strataModels}
               onDeviceInventoryChange={setHasDeviceModels}
               section={effectiveHubSection}
               sectionToggle={

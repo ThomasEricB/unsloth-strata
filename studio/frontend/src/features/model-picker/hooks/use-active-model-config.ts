@@ -4,6 +4,7 @@
 import { isExternalModelId, useChatRuntimeStore } from "@/features/chat";
 import { usePlatformStore } from "@/config/env";
 import { isNpuModelId } from "@/features/npu";
+import { isStrataModelId } from "@/features/strata";
 import { useMemo } from "react";
 import {
   type PerModelConfig,
@@ -118,7 +119,10 @@ export function useActiveModelConfig(): ActiveModelConfigState {
       engineParallelism,
       customContextLength: customContextLength ?? null,
       // Self-sizing backends carry no pin: this is the resolved length, not the user's choice.
-      maxSeqLength: isGguf || isMlx || isNpuModelId(checkpoint) ? null : maxSeqLength,
+      maxSeqLength:
+        isGguf || isMlx || isNpuModelId(checkpoint) || isStrataModelId(checkpoint)
+          ? null
+          : maxSeqLength,
       kvCacheDtype: kvCacheDtype ?? null,
       mlxKvQuant: effectiveMlxKvQuant,
       mlxInt8Prefill: effectiveMlxInt8Prefill,

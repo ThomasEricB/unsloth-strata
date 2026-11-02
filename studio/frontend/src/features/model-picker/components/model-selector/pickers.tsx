@@ -103,6 +103,11 @@ import {
   useNpuCatalog,
 } from "@/features/npu";
 import {
+  type StrataModel,
+  strataContextLabel,
+  strataRowsFor,
+} from "@/features/strata";
+import {
   useDebouncedValue,
   useDenseQuantSchemes,
   useGpuInfo,
@@ -3836,6 +3841,7 @@ export function HubModelPicker({
   communityModelPolicy = "none",
   opaqueKind,
   npu,
+  strataModels = null,
   rowFilter,
   moreModels,
   cpuLoad = false,
@@ -3875,6 +3881,8 @@ export function HubModelPicker({
   communityModelPolicy?: CommunityModelPolicy;
   opaqueKind?: "diffusers_pipeline" | "diffusers_modular_pipeline";
   npu?: NpuPickerSource;
+  /** The local Strata install's models (chat picker only); null hides the section. */
+  strataModels?: StrataModel[] | null;
   rowFilter?: ModelPickerRowFilter;
   /** A second Recommended group under its own ListLabel; rows reuse the recommended renderer. */
   moreModels?: {
@@ -4645,6 +4653,7 @@ export function HubModelPicker({
     offeredFormatFilters,
   );
   const [npuOnDeviceCollapsed, setNpuOnDeviceCollapsed] = useState(false);
+  const [strataCollapsed, setStrataCollapsed] = useState(false);
   // Chat passes no task filter and keeps the full set.
   const capabilityScope = useMemo<readonly (keyof ModelCapabilities)[] | null>(() => {
     const tasks: readonly string[] = task
@@ -5698,6 +5707,14 @@ export function HubModelPicker({
         ? npuRowsFor(npuModels, { onDevice: true, query: debouncedQuery })
         : [],
     [npuListed, npuModels, debouncedQuery],
+  );
+  // Strata models are always on the device; a format filter other than All hides them.
+  const strataRows = useMemo(
+    () =>
+      strataModels && formatFilter === "all"
+        ? strataRowsFor(strataModels, debouncedQuery)
+        : [],
+    [strataModels, formatFilter, debouncedQuery],
   );
   const npuBrowseRows = useMemo(
     () =>
@@ -6830,6 +6847,7 @@ export function HubModelPicker({
     visibleCachedModelRows.length === 0 &&
     visibleAdditionalOnDeviceModels.length === 0 &&
     npuOnDeviceRows.length === 0 &&
+    strataRows.length === 0 &&
     sortedLmStudio.length === 0 &&
     sortedLocalDir.length === 0 &&
     // Do not show the empty state above a non-empty Fine-tuned section.
@@ -7785,6 +7803,43 @@ export function HubModelPicker({
     );
   };
 
+  const renderStrataRow = (model: StrataModel) => {
+    const optionKey = makeModelOptionKey("strata", model.id);
+    const isSelected = value === model.model_path;
+    const isLoaded = loadedModelId === model.model_path;
+    const meta = {
+      source: "local",
+      isLora: false,
+      isDownloaded: true,
+    } as const;
+    return (
+      <div key={model.id} className={downloadedRowShellClassName(isSelected)}>
+        <div className="min-w-0 flex-1">
+          <ModelRow
+            label={model.id}
+            meta={["Strata", strataContextLabel(model.max_context_length)]
+              .filter(Boolean)
+              .join(" · ")}
+            selected={isSelected}
+            loaded={isLoaded}
+            capabilities={{
+              vision: model.supports_vision,
+              reasoning: model.supports_reasoning,
+              audio: false,
+              imageGen: false,
+              videoGen: false,
+            }}
+            alignMeta="device"
+            optionProps={hubModelList.getOptionProps(optionKey, isSelected)}
+            onClick={() => onSelect(model.model_path, meta)}
+            vramStatus={null}
+            className={downloadedRowButtonClassName}
+          />
+        </div>
+      </div>
+    );
+  };
+
   // GPU models own the list; the NPU group shows only under the NPU filter, reached from the footer.
   const showNpuBrowse =
     npuCatalog !== null &&
@@ -8221,6 +8276,26 @@ export function HubModelPicker({
                     </ListLabel>
                     {!npuOnDeviceCollapsed &&
                       npuOnDeviceRows.map((model) => renderNpuRow(model, true))}
+                  </>
+                ) : null}
+
+                {showDownloaded && strataRows.length > 0 ? (
+                  <>
+                    <ListLabel
+                      divider={
+                        pinnedRows.length > 0 ||
+                        unslothCachedGguf.length > 0 ||
+                        unslothCachedModelRows.length > 0 ||
+                        unslothAdditionalOnDeviceModels.length > 0 ||
+                        hasOtherModels ||
+                        npuOnDeviceRows.length > 0
+                      }
+                      collapsed={strataCollapsed}
+                      onToggle={() => setStrataCollapsed((v) => !v)}
+                    >
+                      Strata
+                    </ListLabel>
+                    {!strataCollapsed && strataRows.map(renderStrataRow)}
                   </>
                 ) : null}
 
