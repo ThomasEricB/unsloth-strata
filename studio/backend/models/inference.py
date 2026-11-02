@@ -1804,6 +1804,10 @@ class _InferenceRuntimeFields(BaseModel):
         False,
         description = "Whether the active model runs on the AMD Ryzen AI NPU (FastFlowLM through Lemonade)",
     )
+    is_strata: bool = Field(
+        False,
+        description = "Whether the active model is served by a Studio-managed Strata server",
+    )
     mlx_kv_quant: Optional[str] = Field(
         None, description = "MLX KV cache quantization actually applied, in mlx_kv_quant's vocabulary"
     )

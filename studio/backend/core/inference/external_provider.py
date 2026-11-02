@@ -39,14 +39,16 @@ from models.providers import (
 )
 
 # custom endpoints are treated as local because skipping their chat template can forge a turn (#7066).
-_TEMPLATE_APPLYING_PROVIDERS = frozenset({"vllm", "llama_cpp", "ollama", "custom", "lemonade"})
+_TEMPLATE_APPLYING_PROVIDERS = frozenset(
+    {"vllm", "llama_cpp", "ollama", "custom", "lemonade", "strata"}
+)
 
 # only vLLM and llama.cpp document both continuation flags on /v1/chat/completions.
 _CONTINUATION_FLAG_PROVIDERS = frozenset({"vllm", "llama_cpp"})
 
 # custom may reject include_usage; OpenAI Responses returns usage without it; listed streams need it.
 _USAGE_STREAM_OPTION_PROVIDERS = frozenset(
-    {"vllm", "llama_cpp", "ollama", "openrouter", "kimi", "lemonade", "qwen", "qwencloud"}
+    {"vllm", "llama_cpp", "ollama", "openrouter", "kimi", "lemonade", "qwen", "qwencloud", "strata"}
 )
 
 
@@ -73,7 +75,7 @@ def _json_object_refused_for_schema(
 
 
 # launch-time windows are absent from catalogues; custom covers unregistered self-hosted servers.
-_SERVED_WINDOW_PROVIDERS = frozenset({"vllm", "llama_cpp", "custom"})
+_SERVED_WINDOW_PROVIDERS = frozenset({"vllm", "llama_cpp", "custom", "strata"})
 # refresh within one or two turns to detect server restarts.
 _SERVED_WINDOW_TTL_S = 60.0
 _SERVED_WINDOW_TIMEOUT_S = 5.0

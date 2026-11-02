@@ -515,6 +515,22 @@ PROVIDER_REGISTRY: dict[str, dict[str, Any]] = {
         "hidden": True,
         "managed": True,
     },
+    "strata": {
+        "display_name": "Strata",
+        "base_url": "",
+        "default_models": [],
+        "supports_streaming": True,
+        "supports_vision": True,
+        "supports_tool_calling": True,
+        "studio_tools": True,
+        "auth_header": "Authorization",
+        "auth_prefix": "Bearer ",
+        "notes": "Unsloth-managed `strata serve` running a model from the local Strata install.",
+        # Strata reads enable_thinking / reasoning_effort from chat_template_kwargs.
+        "supports_chat_template_kwargs": True,
+        "hidden": True,
+        "managed": True,
+    },
     "openrouter": {
         "display_name": "OpenRouter",
         "base_url": "https://openrouter.ai/api/v1",

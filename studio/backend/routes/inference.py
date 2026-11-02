@@ -9765,7 +9765,7 @@ async def _no_model_loaded_error(
     _npu_model = _resident_npu_model()
     if _npu_model is not None:
         return 400, (
-            f"The loaded NPU model ({_npu_model.model_path}) serves "
+            f"The loaded {_seat_model_label(_npu_model)} model ({_npu_model.model_path}) serves "
             "/v1/chat/completions only. Load a GGUF model to use this endpoint."
         )
     named = (
@@ -9936,10 +9936,22 @@ def _resident_npu_model():
     primary's seat: a request routed to a model kept alongside is not the NPU's."""
     from core.inference.npu_backend import peek_npu_backend
 
+    from core.inference.strata_backend import peek_strata_backend
+
     if routed_slot.get() is not None:
         return None
     npu = peek_npu_backend()
-    return npu.loaded_model if npu is not None else None
+    if npu is not None and npu.loaded_model is not None:
+        return npu.loaded_model
+    strata = peek_strata_backend()
+    return strata.loaded_model if strata is not None else None
+
+
+def _seat_model_label(model) -> str:
+    """How errors name the model holding the primary seat (NPU or Strata)."""
+    from core.inference.strata_backend import is_strata_model_path
+
+    return "Strata" if is_strata_model_path(getattr(model, "model_path", None)) else "NPU"
 
 
 def _unindexed_build_stem(variant: str) -> bool:
@@ -10336,7 +10348,25 @@ async def _reject_unservable_model(
     )
     from utils.openai_auto_switch_settings import get_openai_auto_switch_enabled
     from core.inference.npu_backend import is_npu_model_path
+    from core.inference.strata_backend import is_strata_model_path
 
+    if is_strata_model_path(requested_model) and not await asyncio.to_thread(
+        _loaded_satisfies, requested_model
+    ):
+        message = (
+            f"The Strata model '{requested_model}' is not loaded. Load it in Unsloth Studio first."
+        )
+        path = getattr(getattr(fastapi_request, "url", None), "path", None)
+        raise HTTPException(
+            status_code = 404,
+            detail = (
+                error_body_for_path(
+                    path, message, status = 404, code = "model_not_found", param = "model"
+                )
+                if isinstance(path, str)
+                else message
+            ),
+        )
     if is_npu_model_path(requested_model) and not await asyncio.to_thread(
         _loaded_satisfies, requested_model
     ):
@@ -10980,6 +11010,14 @@ async def _maybe_auto_switch_model(
             return
 
     from core.inference.npu_backend import is_npu_model_path
+    from core.inference.strata_backend import is_strata_model_path
+
+    if named_model and is_strata_model_path(named_model):
+        await _reject_unservable_model(named_model, fastapi_request)
+        await _refuse_foreign_resident()
+        if claim_resident:
+            _claim_slot_for_non_preview(fastapi_request)
+        return
 
     if auto_switch_on and named_model and is_npu_model_path(named_model):
         # Refused before the switch, so a request the NPU cannot serve never evicts the resident model.
@@ -17925,6 +17963,12 @@ def _primary_chat_reports() -> list[dict]:
     npu_model = npu.loaded_model if npu is not None else None
     if npu_model is not None:
         found.append({"kind": "chat", "model": npu_model.id or "", "account": account})
+    from core.inference.strata_backend import peek_strata_backend
+
+    strata = peek_strata_backend()
+    strata_model = strata.loaded_model if strata is not None else None
+    if strata_model is not None:
+        found.append({"kind": "chat", "model": strata_model.id or "", "account": account})
     return found
 
 
@@ -18045,12 +18089,17 @@ def _reassert_chat_claim(policy: str) -> None:
 async def _select_load_slot(request: LoadRequest) -> Optional[_ExtraSlot]:
     """The extra slot already serving the model, or a new one for ``alongside``. None is the primary."""
     from core.inference.npu_backend import is_npu_model_path
+    from core.inference.strata_backend import is_strata_model_path
 
     # Before the early return: the NPU and managed-engine guards read the primary's name.
     await _reap_exited_workers()
     # The NPU backend is one per process and replaces the primary, so it never takes a slot. vLLM
     # and SGLang reserve a fixed share of the GPU up front, so neither shares it with a kept model.
-    if is_npu_model_path(request.model_path) or request.engine != "auto":
+    if (
+        is_npu_model_path(request.model_path)
+        or is_strata_model_path(request.model_path)
+        or request.engine != "auto"
+    ):
         routed_slot.set(None)
         return None
     requested = _model_key(request)
@@ -18252,6 +18301,20 @@ async def _unload_npu_before_local_load() -> None:
     if npu is not None and npu.is_loaded:
         logger.info("Unloading the NPU model before loading a local model")
         await asyncio.to_thread(npu.unload)
+    await _unload_strata_before_local_load()
+
+
+async def _unload_strata_before_local_load() -> None:
+    """Stop the Strata server before another model takes the primary's seat (and the GPU)."""
+    from core.inference.strata_backend import peek_strata_backend
+
+    if routed_slot.get() is not None:
+        return
+    strata = peek_strata_backend()
+    if strata is not None and (strata.is_loaded or strata.loading_model):
+        logger.info("Unloading the Strata model before loading another model")
+        await asyncio.to_thread(strata.cancel_load)
+        await asyncio.to_thread(strata.unload)
 
 
 async def _load_npu_model(
@@ -18340,6 +18403,7 @@ async def _load_npu_model(
             f"Unloading Unsloth model '{backend.active_model_name}' before loading on the NPU"
         )
         await asyncio.to_thread(backend.unload_model, backend.active_model_name)
+    await _unload_strata_before_local_load()
     # Nothing to reload once idle: this model is not the one the idle stash names.
     note_model_unloaded()
     await asyncio.to_thread(release_chat_gpu_claim)
@@ -18372,6 +18436,177 @@ async def _load_npu_model(
     return _npu_load_response(resident, "loaded")
 
 
+def _strata_load_response(resident, status: str) -> LoadResponse:
+    model = resident.model
+    return LoadResponse(
+        status = status,
+        model = model.model_path,
+        display_name = model.id,
+        is_strata = True,
+        is_vision = model.vision,
+        inference = load_inference_config(model.id),
+        context_length = resident.context_length,
+        max_context_length = model.max_context_length,
+        native_context_length = model.max_context_length,
+        context_length_enforced = True,
+        context_length_fitted = None,
+        supports_reasoning = model.reasoning,
+        reasoning_style = "enable_thinking",
+        supports_tools = model.tools,
+    )
+
+
+async def _load_strata_model(
+    request: LoadRequest,
+    *,
+    current_request_counted: bool,
+    on_reload_confirmed,
+    load_cancel_event: Optional[threading.Event],
+) -> LoadResponse:
+    """``/load`` for a ``strata:<model_name>`` model: the same swap rules as an NPU model.
+    Strata serves the model with its own run config; Studio's context and GPU options do not apply."""
+    from core.inference.strata_backend import (
+        StrataError,
+        StrataLoadCancelled,
+        get_strata_backend,
+        model_id_from_path,
+    )
+    from core.inference.llama_keepwarm import note_model_unloaded
+    from core.inference.npu_backend import peek_npu_backend
+
+    if account_access.managed_account():
+        raise HTTPException(
+            status_code = 403,
+            detail = "Strata models are available to this installation's owner only.",
+        )
+    strata = get_strata_backend()
+    try:
+        model_id = model_id_from_path(request.model_path)
+    except StrataError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from None
+    requested_ctx = (
+        request.max_seq_length if request.max_seq_length and request.max_seq_length > 0 else None
+    )
+    resident = strata.resident()
+    if resident is not None and resident.model.id == model_id and not request.force_reload:
+        account_access.join_resident("chat")
+        return _strata_load_response(resident, "already_loaded")
+    try:
+        await asyncio.to_thread(strata.loadable_model, model_id)
+    except StrataError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from None
+    if routed_slot.get() is None:
+        await _guard_primary_replacement(request, (request.model_path,))
+    llama_backend = get_llama_cpp_backend()
+    unsloth_backend = _peek_inference_backend()
+    npu = peek_npu_backend()
+    serving = bool(
+        getattr(llama_backend, "is_active", getattr(llama_backend, "is_loaded", False))
+        or (unsloth_backend is not None and unsloth_backend.active_model_name)
+        or (npu is not None and npu.is_loaded)
+        or resident is not None
+    )
+    _raise_if_sidecar_swap_in_progress()
+    if serving:
+        if on_reload_confirmed is not None:
+            on_reload_confirmed(cancel = False)
+        await _wait_for_model_switch_idle(
+            current_request_counted = current_request_counted,
+            cancel_pending = on_reload_confirmed is not None and bool(request.force_cancel_active),
+        )
+    _raise_if_sidecar_swap_in_progress()
+    with _scoped_load_attempts_lock:
+        shutting_down = _loads_shutting_down
+    if shutting_down or (load_cancel_event is not None and load_cancel_event.is_set()):
+        raise HTTPException(status_code = 409, detail = "Model load cancelled")
+    if on_reload_confirmed is not None:
+        on_reload_confirmed(cancel = True)
+        if request.force_cancel_active:
+            await _wait_for_model_switch_idle(
+                current_request_counted = current_request_counted,
+                timeout_s = _POST_CANCEL_DRAIN_TIMEOUT_S,
+            )
+    _set_preview_resident(None)
+    await _unload_llama_before_standard_load(llama_backend)
+    backend = _peek_inference_backend()
+    if backend is not None and backend.active_model_name:
+        logger.info(
+            f"Unloading Unsloth model '{backend.active_model_name}' before loading in Strata"
+        )
+        await asyncio.to_thread(backend.unload_model, backend.active_model_name)
+    if npu is not None and npu.is_loaded:
+        logger.info("Unloading the NPU model before loading in Strata")
+        await asyncio.to_thread(npu.unload)
+    note_model_unloaded()
+    await asyncio.to_thread(release_chat_gpu_claim)
+    if load_cancel_event is not None and load_cancel_event.is_set():
+        raise HTTPException(status_code = 409, detail = "Model load cancelled")
+    load = asyncio.ensure_future(asyncio.to_thread(strata.load, model_id, requested_ctx))
+    if load_cancel_event is not None:
+        while not load.done():
+            await asyncio.wait({load}, timeout = 0.25)
+            if load_cancel_event.is_set() and not load.done():
+                if await asyncio.to_thread(strata.cancel_load, model_id):
+                    break
+    try:
+        await load
+    except StrataLoadCancelled:
+        raise HTTPException(status_code = 409, detail = "Model load cancelled") from None
+    except StrataError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from None
+    if load_cancel_event is not None and load_cancel_event.is_set():
+        await asyncio.to_thread(strata.unload)
+        raise HTTPException(status_code = 409, detail = "Model load cancelled")
+    resident = strata.resident()
+    if resident is None:
+        raise HTTPException(status_code = 409, detail = "Model load cancelled")
+    account_access.publish_resident("chat", request.model_path)
+    api_monitor.record_lifecycle(event = "load", model = request.model_path)
+    return _strata_load_response(resident, "loaded")
+
+
+async def _unload_strata_model(request, current_subject: str, note_model_unloaded) -> "UnloadResponse":
+    """``/unload`` (and "Stop loading") for a ``strata:<model_name>`` model."""
+    from core.inference.llama_keepwarm import inference_lifecycle_gate
+    from core.inference.strata_backend import MODEL_PREFIX, peek_strata_backend
+
+    if account_access.managed_account():
+        raise HTTPException(status_code = 404, detail = "Model not found")
+    strata = peek_strata_backend()
+    requested_id = request.model_path[len(MODEL_PREFIX) :].strip()
+    if request.cancel_load_request_id is not None:
+        attempt, is_running = _cancel_scoped_load_attempt(request, current_subject)
+        if attempt is not None and is_running:
+            try:
+                if strata is not None and await asyncio.to_thread(
+                    strata.cancel_load, requested_id
+                ):
+                    logger.info(f"Cancelled scoped in-flight Strata load: {request.model_path}")
+            finally:
+                attempt.cancel_complete.set()
+        return UnloadResponse(status = "unloaded", model = request.model_path)
+    if strata is not None and await asyncio.to_thread(strata.cancel_load, requested_id):
+        logger.info(f"Cancelled in-flight Strata load: {request.model_path}")
+        return UnloadResponse(status = "unloaded", model = request.model_path)
+    async with inference_lifecycle_gate():
+        strata_model = strata.loaded_model if strata is not None else None
+        if strata_model is not None and strata_model.id == requested_id:
+            _raise_or_cancel_active_generations(
+                force = request.force_cancel_active, action = "Unloading the model"
+            )
+            await _drain_and_recancel_before_teardown(
+                force = request.force_cancel_active, action = "Unloading the model"
+            )
+            await asyncio.to_thread(strata.unload)
+            note_model_unloaded()
+            account_access.clear_resident("chat")
+            api_monitor.record_lifecycle(
+                event = "unload", model = request.model_path, reason = "manual"
+            )
+            logger.info(f"Unloaded Strata model: {request.model_path}")
+    return UnloadResponse(status = "unloaded", model = request.model_path)
+
+
 async def _load_model_impl(
     request: LoadRequest,
     fastapi_request: Request,
@@ -18386,7 +18621,15 @@ async def _load_model_impl(
     speech_codec_path: Optional[str] = None,
 ):
     from core.inference.npu_backend import is_npu_model_path
+    from core.inference.strata_backend import is_strata_model_path
 
+    if is_strata_model_path(request.model_path):
+        return await _load_strata_model(
+            request,
+            current_request_counted = current_request_counted,
+            on_reload_confirmed = on_reload_confirmed,
+            load_cancel_event = load_cancel_event,
+        )
     if is_npu_model_path(request.model_path):
         return await _load_npu_model(
             request,
@@ -21170,6 +21413,10 @@ async def _unload_model_impl(request: UnloadRequest, current_subject: str):
         note_model_unloaded = lambda: None
 
     try:
+        from core.inference.strata_backend import is_strata_model_path
+
+        if is_strata_model_path(request.model_path):
+            return await _unload_strata_model(request, current_subject, note_model_unloaded)
         if is_npu_model_path(request.model_path):
             if account_access.managed_account():
                 # Only the owner loads NPU models, so no managed account shares or stops one.
@@ -22022,6 +22269,33 @@ async def _slot_status(current_subject: str):
 
         _npu = peek_npu_backend()
         _npu_resident = _npu.resident() if _npu is not None and routed_slot.get() is None else None
+        from core.inference.strata_backend import peek_strata_backend
+
+        _strata = peek_strata_backend()
+        _strata_resident = (
+            _strata.resident() if _strata is not None and routed_slot.get() is None else None
+        )
+        if _npu_resident is None and _strata_resident is not None:
+            _strata_model = _strata_resident.model
+            return InferenceStatusResponse(
+                active_model = _strata_model.id,
+                model_identifier = _strata_model.model_path,
+                is_strata = True,
+                is_vision = _strata_model.vision,
+                loading = _loading,
+                loaded = [_strata_model.model_path],
+                inference = load_inference_config(_strata_model.id),
+                context_length = _strata_resident.context_length,
+                requested_context_length = _strata_resident.requested_context_length,
+                max_context_length = _strata_model.max_context_length,
+                native_context_length = _strata_model.max_context_length,
+                context_length_enforced = True,
+                context_length_fitted = None,
+                supports_reasoning = _strata_model.reasoning,
+                reasoning_style = "enable_thinking",
+                supports_tools = _strata_model.tools,
+                llama_cpp_supports_mtp = _supports_mtp,
+            )
         if _npu_resident is not None:
             _npu_model = _npu_resident.model
             return InferenceStatusResponse(
@@ -29485,6 +29759,69 @@ def _refuse_npu_chat_request(payload, *, supports_vision: bool, supports_tools: 
             )
 
 
+async def _strata_chat_completions(payload, request: Request, current_subject: str):
+    """Proxy chat to the Studio-managed Strata server. Strata serves tools, images and reasoning
+    itself, so Studio's tool loop (browser use, MCP, search) runs on top as for a connection."""
+    from core.inference.strata_backend import StrataError, get_strata_backend
+
+    try:
+        upstream = await asyncio.to_thread(get_strata_backend().upstream)
+    except StrataError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from None
+    if _wants_multiple_choices(payload):
+        _raise_unsupported_n("Strata chat completions")
+    _normalize_chat_reasoning_controls(payload)
+    if _legacy_image_is_distinct(payload):
+        # The proxy reads messages only, so splice a top-level image in as GGUF chat does.
+        payload = payload.model_copy(
+            update = {
+                "messages": [
+                    ChatMessage.model_validate(message)
+                    for message in _openai_messages_for_passthrough(payload, vision = True)
+                ]
+            }
+        )
+    if payload.stream:
+        return await _proxy_to_external_provider(
+            payload, request, current_subject, managed = upstream
+        )
+    # The proxy answers as an event stream, so a JSON caller's reply is streamed upstream and
+    # collected. Strata enforces stop sequences itself, so the relay is given none.
+    relay = _NpuStreamRelay(upstream.public_model, None)
+    response = await _proxy_to_external_provider(
+        payload.model_copy(update = {"stream": True}),
+        request,
+        current_subject,
+        managed = upstream,
+        early_close_status = lambda: "completed" if relay.stopped else "cancelled",
+    )
+    body = response.body_iterator
+    try:
+        async for piece in body:
+            text = piece.decode("utf-8") if isinstance(piece, bytes) else piece
+            for line in text.split("\n"):
+                if line.strip():
+                    relay.feed(line)
+            if relay.error is not None:
+                break
+    finally:
+        await body.aclose()
+    if relay.error is not None:
+        try:
+            status = int(relay.error.get("code") or 502)
+        except (TypeError, ValueError):
+            status = 502
+        return JSONResponse(
+            status_code = status if 400 <= status < 600 else 502, content = {"error": relay.error}
+        )
+    if relay.finish_reason is None:
+        return JSONResponse(
+            status_code = 502,
+            content = {"error": {"message": "The Strata model stopped before finishing its reply."}},
+        )
+    return JSONResponse(content = relay.completion())
+
+
 async def _npu_chat_completions(payload, request: Request, current_subject: str):
     """Proxy NPU chat, rejecting unsupported parameters.
 
@@ -30633,6 +30970,12 @@ async def produce_openai_chat_completions(
     if _npu is not None and _npu.is_loaded and routed_slot.get() is None:
         _refuse_unused_mcp_image(_mcp_image)
         return await _npu_chat_completions(payload, request, current_subject)
+
+    from core.inference.strata_backend import peek_strata_backend
+
+    _strata = peek_strata_backend()
+    if _strata is not None and _strata.is_loaded and routed_slot.get() is None:
+        return await _strata_chat_completions(payload, request, current_subject)
 
     llama_backend = get_llama_cpp_backend()
     using_gguf = llama_backend.is_loaded
@@ -35553,6 +35896,24 @@ def _slot_model_objects() -> list[dict]:
         if _npu_model.max_context_length:
             _npu_entry["max_context_length"] = _npu_model.max_context_length
         models.append(_npu_entry)
+
+    from core.inference.strata_backend import peek_strata_backend
+
+    _strata = peek_strata_backend()
+    _strata_resident = (
+        _strata.resident() if _strata is not None and routed_slot.get() is None else None
+    )
+    if _strata_resident is not None:
+        _strata_entry = {
+            "id": _strata_resident.model.model_path,
+            "object": "model",
+            "created": _created,
+            "owned_by": _OWNED_BY,
+            "device": "strata",
+        }
+        if _strata_resident.context_length:
+            _strata_entry["context_length"] = _strata_resident.context_length
+        models.append(_strata_entry)
 
     # Check GGUF backend
     llama_backend = get_llama_cpp_backend()
@@ -41746,6 +42107,15 @@ async def chat_count_tokens(
             status_code = 503,
             detail = "Token counting is not available for NPU models.",
         )
+    from core.inference.strata_backend import peek_strata_backend
+
+    _strata = peek_strata_backend()
+    if _strata is not None and _strata.is_loaded and routed_slot.get() is None:
+        # Strata serves no tokenizer endpoint; each reply's usage still reports the prompt size.
+        raise HTTPException(
+            status_code = 503,
+            detail = "Token counting is not available for Strata models.",
+        )
 
     llama_backend = get_llama_cpp_backend()
     if not llama_backend.is_loaded:
@@ -43153,7 +43523,7 @@ async def anthropic_messages(
             raise HTTPException(
                 status_code = 400,
                 detail = (
-                    f"The loaded NPU model ({_npu_model.model_path}) serves "
+                    f"The loaded {_seat_model_label(_npu_model)} model ({_npu_model.model_path}) serves "
                     "/v1/chat/completions only. Load a GGUF model to use the "
                     "Anthropic Messages API."
                 ),
