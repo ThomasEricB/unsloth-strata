@@ -83,6 +83,7 @@ import {
   useNativePathLeasesSupported,
 } from "@/features/native-intents";
 import { isNpuModelId } from "@/features/npu";
+import { isStrataModelId } from "@/features/strata";
 import { GuidedTour, useGuidedTourController } from "@/features/tour";
 import { isTauri } from "@/lib/api-base";
 // The images and video barrels export only their pages; the status calls alone keep those pages out of the chat chunk.
@@ -3768,8 +3769,11 @@ export function ChatPage({
       const currentVariant = store.activeGgufVariant;
       if (!meta?.adoptOnly) userPickCountRef.current += 1;
       if (!value) return;
-      // NPU picks have no adopt path: loadNpuModel always reaches /load.
-      if (meta?.adoptOnly && (isNpuModelId(value) || isExternalModelId(value))) {
+      // NPU and Strata picks have no adopt path: loadNpuModel always reaches /load.
+      if (
+        meta?.adoptOnly &&
+        (isNpuModelId(value) || isStrataModelId(value) || isExternalModelId(value))
+      ) {
         return;
       }
       setPendingHubAutoLoad(null);
@@ -3787,7 +3791,8 @@ export function ChatPage({
           return;
         }
       }
-      if (isNpuModelId(value)) {
+      // A Strata model loads like an NPU one: one /load, no context fitting or GPU options.
+      if (isNpuModelId(value) || isStrataModelId(value)) {
         void loadNpuModel(value, {
           forceReload: meta?.forceReload,
           config: meta?.config,

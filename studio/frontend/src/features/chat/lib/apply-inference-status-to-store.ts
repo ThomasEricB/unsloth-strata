@@ -327,8 +327,12 @@ export function applyActiveModelStatusToStore(
     isGguf:
       (status.is_gguf ?? true) ||
       (status.is_mlx ?? false) ||
-      (status.is_npu ?? false),
-    isMlx: (status.is_mlx ?? false) || (status.is_npu ?? false),
+      (status.is_npu ?? false) ||
+      (status.is_strata ?? false),
+    isMlx:
+      (status.is_mlx ?? false) ||
+      (status.is_npu ?? false) ||
+      (status.is_strata ?? false),
     seedLoadParams,
     modelChanged: slotsModelChanged,
     // Both fields: older records still carry the MLX pin in maxSeqLength.

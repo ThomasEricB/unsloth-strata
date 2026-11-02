@@ -40,6 +40,7 @@ import {
   computeTransferStats,
 } from "@/lib/transfer-stats";
 import { confirmRemoteCodeIfNeeded } from "@/features/security";
+import { isStrataModelId } from "@/features/strata";
 import { defaultInferenceParams } from "../presets/preset-policy";
 import {
   type ReloadHint,
@@ -3532,6 +3533,7 @@ export function useChatModelRuntime() {
       const displayName = modelDisplayName(
         modelPath.slice(modelPath.indexOf(":") + 1),
       );
+      const where = isStrataModelId(modelPath) ? "in Strata" : "on the NPU";
       const previous = useChatRuntimeStore.getState();
       const previousCheckpoint = previous.params.checkpoint;
       const previousGgufVariant = previous.activeGgufVariant;
@@ -3582,7 +3584,7 @@ export function useChatModelRuntime() {
         loadingModelRef.current = loadInfo;
         useChatRuntimeStore.getState().setLoadingModelPick(pickOf(loadInfo));
         setLoadProgress({ percent: null, label: null, phase: "starting" });
-        toastId = toast.loading(`Loading ${displayName} on the NPU`);
+        toastId = toast.loading(`Loading ${displayName} ${where}`);
         loadToastIdRef.current = toastId;
         loadRun.forceCancelActive = stopDecision.forceCancelActive;
         loadRun.loadAttemptPath = modelPath;
@@ -3609,7 +3611,7 @@ export function useChatModelRuntime() {
         });
         syncModelCapabilities(modelPath, status);
         void refreshContextUsage({ afterModelLoad: true });
-        toast.success(`${displayName} loaded on the NPU`, {
+        toast.success(`${displayName} loaded ${where}`, {
           id: toastId,
           closeButton: true,
           duration: 4000,
