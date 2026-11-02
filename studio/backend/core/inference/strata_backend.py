@@ -77,6 +77,8 @@ class StrataModel:
     vision: bool
     resident_budget_gib: Optional[float]
     pack_dir: Optional[str]
+    # The run config's own port, where Strata's tools look for a running server.
+    port: Optional[int] = None
     # Strata serves tool calls and reasoning for every model family it supports.
     tools: bool = True
     reasoning: bool = True
@@ -193,6 +195,7 @@ def read_run_config(path: Path) -> Optional[StrataModel]:
         vision = bool(config.get("vision")) or "--vision" in args,
         resident_budget_gib = _positive_float(_flag(args, "--resident-budget-gib")),
         pack_dir = _flag(args, "--pack"),
+        port = _positive_int(config.get("port")),
     )
 
 
@@ -236,9 +239,10 @@ def _kill_with_the_parent() -> None:
 class StrataServer:
     """One private `strata serve --profile <run config>` on a random loopback port and key."""
 
-    def __init__(self, binary: Path, config_path: str) -> None:
+    def __init__(self, binary: Path, config_path: str, preferred_port: Optional[int] = None) -> None:
         self.binary = binary
         self.config_path = config_path
+        self.preferred_port = preferred_port
         self.port: Optional[int] = None
         self.api_key: Optional[str] = None
         self.health: dict[str, Any] = {}
@@ -264,14 +268,31 @@ class StrataServer:
         return "\n".join(list(self._tail)[-lines:])
 
     @staticmethod
-    def _free_port() -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return int(s.getsockname()[1])
+    def _free_port(wanted: int = 0) -> Optional[int]:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", wanted))
+                return int(s.getsockname()[1])
+        except OSError:
+            return None
+
+    def _pick_port(self, attempt: int) -> int:
+        """The run config's port when it is free: the Strata app and `strata status` look for a
+        running server there (and on no random one), so they see this one and do not start a
+        second engine beside it. Any free port otherwise, and on a retry."""
+        if attempt == 0 and self.preferred_port:
+            port = self._free_port(self.preferred_port)
+            if port is not None:
+                return port
+            logger.info("Port %s is taken; serving Strata on a random port.", self.preferred_port)
+        port = self._free_port()
+        if port is None:
+            raise StrataError("No free local port for the Strata server.")
+        return port
 
     def start(self, cancelled: threading.Event, timeout: float = _LOAD_TIMEOUT_S) -> None:
         for attempt in range(3):
-            if self._start_once(cancelled, timeout):
+            if self._start_once(cancelled, timeout, attempt):
                 return
             if cancelled.is_set() or self._stop_requested.is_set():
                 raise StrataLoadCancelled("Loading the Strata model was cancelled.")
@@ -282,10 +303,10 @@ class StrataServer:
             reason = f" (exit code {failed.get('exit_code')})" if failed else ""
             raise StrataError(f"Strata did not start{reason}. Last output:\n{self.log_tail()}")
 
-    def _start_once(self, cancelled: threading.Event, timeout: float) -> bool:
+    def _start_once(self, cancelled: threading.Event, timeout: float, attempt: int = 0) -> bool:
         if is_process_shutting_down():
             raise StrataError("Unsloth is shutting down; not starting Strata.")
-        port, api_key = self._free_port(), secrets.token_urlsafe(32)
+        port, api_key = self._pick_port(attempt), secrets.token_urlsafe(32)
         env = child_env_without_native_path_secret()
         # The key travels in the environment, never argv, which any local user can read.
         env["STRATA_API_KEY"] = api_key
@@ -575,7 +596,7 @@ class StrataBackend:
                 self._stop_server()
                 self._raise_if_load_cancelled(model_id)
                 self._refuse_short_memory(model)
-                server = StrataServer(binary, model.config_path)
+                server = StrataServer(binary, model.config_path, model.port)
                 self._server = server
                 try:
                     server.start(self._load_cancelled)
