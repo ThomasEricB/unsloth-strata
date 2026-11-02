@@ -465,7 +465,10 @@ class StrataBackend:
 
     def resident(self) -> Optional[StrataResident]:
         loaded, server = self._loaded, self._server
-        if loaded is None or server is None or not server.is_alive():
+        if loaded is not None and server is not None and not server.is_alive():
+            self._forget_dead_server(loaded, server)
+            return None
+        if loaded is None or server is None:
             return None
         port, api_key = server.port, server.api_key
         if port is None:
@@ -477,6 +480,27 @@ class StrataBackend:
             base_url = f"http://127.0.0.1:{port}",
             api_key = api_key or "",
         )
+
+    def _forget_dead_server(self, loaded: _Loaded, server: StrataServer) -> None:
+        """The engine died under a loaded model (a crash, an out-of-memory kill, the Strata app
+        stopping it): drop the model so Studio stops routing chat to it, and keep why for status."""
+        if not self._commit_lock.acquire(blocking = False):
+            return
+        try:
+            if self._loaded is not loaded or self._server is not server:
+                return
+            code = server._process.poll() if server._process is not None else None
+            self._error = (
+                f"The Strata server for {loaded.model.id} stopped unexpectedly"
+                + (f" (exit code {code})" if code is not None else "")
+                + f". Last output:\n{server.log_tail(15)}"
+            )
+            logger.warning(self._error)
+            self._loaded = None
+            self._server = None
+        finally:
+            self._commit_lock.release()
+        server.close()
 
     @property
     def is_loaded(self) -> bool:

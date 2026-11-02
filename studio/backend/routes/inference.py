@@ -10353,8 +10353,13 @@ async def _reject_unservable_model(
     if is_strata_model_path(requested_model) and not await asyncio.to_thread(
         _loaded_satisfies, requested_model
     ):
+        from core.inference.strata_backend import peek_strata_backend
+
+        _strata = peek_strata_backend()
+        _strata_error = _strata.status().get("error") if _strata is not None else None
         message = (
             f"The Strata model '{requested_model}' is not loaded. Load it in Unsloth Studio first."
+            + (f" {_strata_error}" if _strata_error else "")
         )
         path = getattr(getattr(fastapi_request, "url", None), "path", None)
         raise HTTPException(
